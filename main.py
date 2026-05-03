@@ -88,10 +88,10 @@ def get_server_public_url(owner: str, folder: str, port: int = None) -> str:
     key = f"{owner}::{folder}" if is_admin_session() else folder
     
     if base_url:
-        # إذا كنا على منصة سحابية، استخدم مسار الوكيل
+        # في المنصات السحابية، استخدم مسار الوكيل
         if "railway" in base_url.lower() or "render" in base_url.lower() or "heroku" in base_url.lower():
             return f"{base_url}/proxy/{key}"
-        # إذا كنا على Ngrok أو IP عام، استخدم المنفذ المباشر
+        # في Ngrok أو IP عام، استخدم المنفذ المباشر
         else:
             return f"{base_url}:{project_port}" if ":" not in base_url else base_url
     
@@ -465,6 +465,7 @@ while True:
 
 
 def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
+    """تشغيل مشروع Flask بشكل صحيح مع دعم Railway"""
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
@@ -472,7 +473,10 @@ def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
     env["PORT"] = str(port)
     env["FLASK_APP"] = startup_file
     env["FLASK_ENV"] = "production"
+    env["FLASK_RUN_HOST"] = "0.0.0.0"
+    env["FLASK_RUN_PORT"] = str(port)
     
+    # تأكد من أن Flask يستمع على 0.0.0.0
     proc = subprocess.Popen(
         [sys.executable, "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
         cwd=server_dir,
@@ -484,6 +488,7 @@ def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
 
 
 def run_web_project(owner: str, folder: str, startup_file: str, port: int):
+    """تشغيل مشروع ويب عادي (FastAPI, Django, etc)"""
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
@@ -571,11 +576,13 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         proc, logf = start_project(owner, folder, startup_file)
         running_procs[key] = (proc, logf)
         
-        time.sleep(2.0)
+        time.sleep(3.0)  # انتظر 3 ثواني عشان يتأكد إن العملية اشتغلت
         if proc.poll() is None:
             set_state(key, "Running")
+            log_append(key, "[SYSTEM] Project started successfully ✅\n")
         else:
             set_state(key, "Offline")
+            log_append(key, f"[SYSTEM] Process died with code: {proc.poll()}\n")
     except Exception as e:
         log_append(key, f"[SYSTEM] Start failed: {e}\n")
         set_state(key, "Offline")
@@ -601,6 +608,7 @@ def proxy_project(key, subpath=""):
     
     port = meta.get("port", 5000)
     
+    # بناء الرابط الداخلي
     target_url = f"http://localhost:{port}/{subpath}"
     if subpath and not subpath.endswith('/') and request.query_string:
         target_url += f"?{request.query_string.decode()}"
@@ -608,23 +616,26 @@ def proxy_project(key, subpath=""):
         target_url += f"?{request.query_string.decode()}"
     
     try:
+        # توجيه الطلب إلى المشروع الداخلي
+        headers = {k: v for k, v in request.headers if k.lower() != 'host'}
         resp = requests.request(
             method=request.method,
             url=target_url,
-            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            headers=headers,
             data=request.get_data(),
             cookies=request.cookies,
             allow_redirects=False,
             timeout=30
         )
         
+        # إرجاع الاستجابة
         return Response(
             resp.content,
             status=resp.status_code,
             headers=dict(resp.headers)
         )
     except requests.exceptions.ConnectionError:
-        return "Project not reachable", 502
+        return "Project not reachable. Make sure it's running on port " + str(port), 502
     except Exception as e:
         return f"Proxy error: {e}", 500
 
@@ -1211,4 +1222,5 @@ if __name__ == "__main__":
         print(f"\n🚀 الرابط العام لموقعك: {public_url}")
     else:
         print(f"\n⚠️  لا يمكن الحصول على رابط عام، جرب تشغيل Ngrok")
+    print(f"📍 المنصة: {'Railway' if os.environ.get('RAILWAY_STATIC_URL') else 'VPS/Termux'}")
     app.run(host="0.0.0.0", port=port)
