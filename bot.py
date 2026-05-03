@@ -25,14 +25,13 @@ os.makedirs(USERS_ROOT, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PANEL_SECRET_KEY", "CHANGE_ME_" + os.urandom(16).hex())
+app.secret_key = os.environ.get("SECRET_KEY", os.environ.get("PANEL_SECRET_KEY", "CHANGE_ME_" + os.urandom(16).hex()))
 
 ADMIN_USERNAME = os.environ.get("ADMIN_USER", "hama")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "1211")
 
 running_procs = {}
 server_states = {}
-server_ports = {}  # حفظ المنفذ لكل مشروع
 lock = threading.Lock()
 
 # كشف بيئة التشغيل
@@ -86,14 +85,6 @@ def set_state(key: str, state: str):
 def get_state(key: str) -> str:
     with lock:
         return server_states.get(key, "Offline")
-
-def set_server_port(key: str, port: int):
-    with lock:
-        server_ports[key] = port
-
-def get_server_port(key: str) -> int:
-    with lock:
-        return server_ports.get(key, 0)
 
 def log_append(key: str, text: str):
     try:
@@ -337,7 +328,6 @@ def detect_or_set_port(owner: str, folder: str, startup_file: str) -> int:
     return default_port
 
 def get_server_url(owner: str, folder: str) -> str:
-    """إرجاع الرابط (يدعم الوكيل العكسي في المنصات السحابية)"""
     meta = read_meta(owner, folder)
     port = meta.get("port", 5000)
     custom_domain = meta.get("custom_domain", "")
@@ -346,12 +336,10 @@ def get_server_url(owner: str, folder: str) -> str:
     if custom_domain:
         return f"http://{custom_domain}:{port}"
     
-    # إذا كنا في منصة سحابية، استخدم مسار الوكيل
     base_url = get_base_url()
     if base_url:
         return f"{base_url}/proxy/{key}"
     
-    # في Termux أو VPS عادي، استخدم hostname والمنفذ المباشر
     hostname = get_hostname()
     return f"http://{hostname}:{port}"
 
@@ -508,24 +496,33 @@ def stop_proc(key: str):
 
 def background_start(key: str, owner: str, folder: str, startup_file: str):
     try:
+        log_append(key, "[DEBUG] 1 - Started background_start\n")
         set_state(key, "Installing")
-        log_append(key, "[SYSTEM] Preparing...\n")
+        log_append(key, "[DEBUG] 2 - State set to Installing\n")
         
         ensure_requirements_installed(owner, folder)
+        log_append(key, "[DEBUG] 3 - Requirements checked\n")
         
         set_state(key, "Starting")
-        log_append(key, "[SYSTEM] Starting...\n")
+        log_append(key, "[DEBUG] 4 - State set to Starting\n")
         
         proc, logf = start_project(owner, folder, startup_file)
+        log_append(key, "[DEBUG] 5 - Process created\n")
+        
         running_procs[key] = (proc, logf)
+        log_append(key, "[DEBUG] 6 - Process saved\n")
         
         time.sleep(2.0)
         if proc.poll() is None:
             set_state(key, "Running")
+            log_append(key, "[DEBUG] 7 - Running ✅\n")
         else:
             set_state(key, "Offline")
+            log_append(key, f"[DEBUG] 7 - Process died immediately, return code: {proc.poll()}\n")
     except Exception as e:
-        log_append(key, f"[SYSTEM] Start failed: {e}\n")
+        log_append(key, f"[DEBUG] ERROR: {e}\n")
+        import traceback
+        log_append(key, f"[DEBUG] Traceback: {traceback.format_exc()}\n")
         set_state(key, "Offline")
 
 
@@ -534,7 +531,6 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
 @app.route("/proxy/<path:key>/")
 @app.route("/proxy/<path:key>/<path:subpath>")
 def proxy_project(key, subpath=""):
-    """يعرض محتوى المشروع الداخلي عبر الوكيل العكسي"""
     if not can_access_key(key):
         return "Forbidden", 403
     
@@ -550,7 +546,6 @@ def proxy_project(key, subpath=""):
     
     port = meta.get("port", 5000)
     
-    # بناء الرابط الداخلي
     target_url = f"http://localhost:{port}/{subpath}"
     if subpath and not subpath.endswith('/') and request.query_string:
         target_url += f"?{request.query_string.decode()}"
@@ -558,7 +553,6 @@ def proxy_project(key, subpath=""):
         target_url += f"?{request.query_string.decode()}"
     
     try:
-        # إعادة توجيه الطلب إلى المشروع الداخلي
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -569,7 +563,6 @@ def proxy_project(key, subpath=""):
             timeout=30
         )
         
-        # إرجاع الاستجابة
         return Response(
             resp.content,
             status=resp.status_code,
@@ -1136,5 +1129,5 @@ def admin_quickstats():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("SERVER_PORT", 3034))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
