@@ -16,7 +16,6 @@ from functools import wraps
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ✅ NEW: per-user root
 USERS_ROOT = os.path.join(BASE_DIR, "USERS")
 DATA_DIR = os.path.join(BASE_DIR, "DATA")
 USERS_DB = os.path.join(DATA_DIR, "users.json")
@@ -30,8 +29,8 @@ app.secret_key = os.environ.get("PANEL_SECRET_KEY", "CHANGE_ME_" + os.urandom(16
 ADMIN_USERNAME = os.environ.get("ADMIN_USER", "hama")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "1211")
 
-running_procs = {}   # key -> (Popen, log_file_handle)
-server_states = {}   # key -> Offline/Installing/Starting/Running/Banned
+running_procs = {}
+server_states = {}
 lock = threading.Lock()
 
 
@@ -80,9 +79,6 @@ def log_append(key: str, text: str):
         pass
 
 
-# ---------------------------
-# Users DB
-# ---------------------------
 def load_users():
     if not os.path.exists(USERS_DB):
         return {"users": []}
@@ -128,9 +124,6 @@ def get_user_limit(username: str) -> int:
     return 16 if u.get("premium", False) else 1
 
 
-# ---------------------------
-# Auth decorators
-# ---------------------------
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -151,9 +144,6 @@ def admin_required(fn):
     return wrapper
 
 
-# ---------------------------
-# ✅ Per-user server directories
-# ---------------------------
 def get_user_servers_root(username: str) -> str:
     return os.path.join(USERS_ROOT, username, "servers")
 
@@ -167,26 +157,16 @@ def ensure_user_dirs(username: str):
 
 
 def parse_server_key(key: str, allow_admin: bool):
-    """
-    key formats:
-      - normal user:  "serverFolder"
-      - admin:        "username::serverFolder"
-    """
     key = (key or "").strip()
-
     if "::" in key:
         owner, folder = key.split("::", 1)
         owner = owner.strip()
         folder = folder.strip()
-
         if not allow_admin:
             raise ValueError("not allowed")
-
         if not is_admin_session():
             raise ValueError("forbidden")
         return owner, folder
-
-    # no owner provided -> current user
     return current_username(), key
 
 
@@ -202,26 +182,29 @@ def can_access_key(key: str) -> bool:
 
 def safe_join_server_path(key: str, rel_path: str = "") -> str:
     owner, folder = parse_server_key(key, allow_admin=True)
-
     root = os.path.abspath(get_server_dir(owner, folder))
     rel_path = (rel_path or "").replace("\\", "/").strip()
     if rel_path.startswith("/") or rel_path.startswith("~"):
         rel_path = rel_path.lstrip("/").lstrip("~")
-
     joined = os.path.abspath(os.path.join(root, rel_path))
     if not (joined == root or joined.startswith(root + os.sep)):
         raise ValueError("Invalid path")
     return joined
 
 
-# ---------------------------
-# Meta per server
-# ---------------------------
 def ensure_meta(owner: str, folder: str):
     server_dir = get_server_dir(owner, folder)
     os.makedirs(server_dir, exist_ok=True)
     meta_path = os.path.join(server_dir, "meta.json")
-    base = {"display_name": folder, "startup_file": "", "owner": owner, "banned": False}
+    base = {
+        "display_name": folder,
+        "startup_file": "",
+        "owner": owner,
+        "banned": False,
+        "port": 5000,
+        "custom_domain": "",
+        "is_flask": False
+    }
     if not os.path.exists(meta_path):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(base, f, indent=2)
@@ -246,23 +229,21 @@ def ensure_meta(owner: str, folder: str):
 
 
 def read_meta(owner: str, folder: str):
-    meta_path = ensure_meta(owner, folder)
+    ensure_meta(owner, folder)
+    meta_path = os.path.join(get_server_dir(owner, folder), "meta.json")
     try:
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f) or {}
     except Exception:
-        return {"display_name": folder, "startup_file": "", "owner": owner, "banned": False}
+        return {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "custom_domain": "", "is_flask": False}
 
 
 def write_meta(owner: str, folder: str, meta):
-    meta_path = ensure_meta(owner, folder)
+    meta_path = os.path.join(get_server_dir(owner, folder), "meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
 
-# ---------------------------
-# Auto-install system
-# ---------------------------
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -315,12 +296,10 @@ def ensure_requirements_installed(owner: str, folder: str):
     req_path = os.path.join(server_dir, "requirements.txt")
     if not os.path.exists(req_path):
         return False
-
     req_sha = sha256_file(req_path)
     cur = read_installed(owner, folder)
     if cur["req_sha"] == req_sha:
         return False
-
     log_append(f"{owner}::{folder}", "[SYSTEM] Installing requirements.txt...\n")
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=server_dir)
@@ -330,6 +309,39 @@ def ensure_requirements_installed(owner: str, folder: str):
     except subprocess.CalledProcessError as e:
         log_append(f"{owner}::{folder}", f"[SYSTEM] requirements install failed: {e}\n")
         return False
+
+
+def detect_or_set_port(owner: str, folder: str, startup_file: str) -> int:
+    meta = read_meta(owner, folder)
+    if "port" in meta and isinstance(meta["port"], int):
+        return meta["port"]
+    server_dir = get_server_dir(owner, folder)
+    startup_path = os.path.join(server_dir, startup_file)
+    default_port = 5000
+    try:
+        with open(startup_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            match = re.search(r'port\s*=\s*(\d+)', content)
+            if match:
+                default_port = int(match.group(1))
+            match = re.search(r'app\.run\([^)]*port\s*=\s*(\d+)', content)
+            if match:
+                default_port = int(match.group(1))
+    except Exception:
+        pass
+    meta["port"] = default_port
+    write_meta(owner, folder, meta)
+    return default_port
+
+
+def get_server_url(owner: str, folder: str) -> str:
+    meta = read_meta(owner, folder)
+    port = meta.get("port", 5000)
+    server_ip = get_ip()
+    custom_domain = meta.get("custom_domain", "")
+    if custom_domain:
+        return f"http://{custom_domain}"
+    return f"http://{server_ip}:{port}"
 
 
 def start_with_autoinstall(owner: str, folder: str, startup_file: str):
@@ -385,7 +397,6 @@ while True:
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
-
     proc = subprocess.Popen(
         [sys.executable, "-u", "-c", wrapper_code, startup_file],
         cwd=server_dir,
@@ -393,6 +404,89 @@ while True:
         stderr=log_file,
     )
     return proc, log_file
+
+
+def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
+    """تشغيل مشروع Flask بشكل صحيح مع auto install"""
+    server_dir = get_server_dir(owner, folder)
+    log_path = os.path.join(server_dir, "server.log")
+    log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+    env["FLASK_APP"] = startup_file
+    env["FLASK_ENV"] = "production"
+    
+    # استخدام flask run بدلاً من python مباشرة
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
+        cwd=server_dir,
+        stdout=log_file,
+        stderr=log_file,
+        env=env
+    )
+    return proc, log_file
+
+
+def run_web_project(owner: str, folder: str, startup_file: str, port: int):
+    """تشغيل مشروع ويب عادي (FastAPI, Django, etc)"""
+    server_dir = get_server_dir(owner, folder)
+    log_path = os.path.join(server_dir, "server.log")
+    log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+    proc = subprocess.Popen(
+        [sys.executable, startup_file],
+        cwd=server_dir,
+        stdout=log_file,
+        stderr=log_file,
+        env=env
+    )
+    return proc, log_file
+
+
+def start_project(owner: str, folder: str, startup_file: str):
+    server_dir = get_server_dir(owner, folder)
+    startup_path = os.path.join(server_dir, startup_file)
+    
+    # كشف نوع المشروع
+    is_flask = False
+    is_fastapi = False
+    is_django = False
+    
+    try:
+        with open(startup_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            is_flask = "Flask" in content or "flask" in content.lower()
+            is_fastapi = "FastAPI" in content
+            is_django = "django" in content.lower() or "Django" in content
+    except Exception:
+        pass
+    
+    port = detect_or_set_port(owner, folder, startup_file)
+    
+    if is_flask:
+        log_append(f"{owner}::{folder}", f"[SYSTEM] Flask project detected. Using port {port}\n")
+        log_append(f"{owner}::{folder}", f"[SYSTEM] Access at: {get_server_url(owner, folder)}\n")
+        
+        # تحديث meta للإشارة إلى أنه مشروع Flask
+        meta = read_meta(owner, folder)
+        meta["is_flask"] = True
+        write_meta(owner, folder, meta)
+        
+        # تثبيت Flask إذا لم يكن موجوداً
+        ensure_requirements_installed(owner, folder)
+        
+        return run_flask_project(owner, folder, startup_file, port)
+    
+    elif is_fastapi or is_django:
+        log_append(f"{owner}::{folder}", f"[SYSTEM] Web framework detected. Using port {port}\n")
+        log_append(f"{owner}::{folder}", f"[SYSTEM] Access at: {get_server_url(owner, folder)}\n")
+        ensure_requirements_installed(owner, folder)
+        return run_web_project(owner, folder, startup_file, port)
+    
+    else:
+        log_append(f"{owner}::{folder}", "[SYSTEM] Bot/script detected (using auto-install)\n")
+        return start_with_autoinstall(owner, folder, startup_file)
 
 
 def stop_proc(key: str):
@@ -412,9 +506,29 @@ def stop_proc(key: str):
         running_procs.pop(key, None)
 
 
-# ---------------------------
-# Pages
-# ---------------------------
+def background_start(key: str, owner: str, folder: str, startup_file: str):
+    try:
+        set_state(key, "Installing")
+        log_append(key, "[SYSTEM] Preparing...\n")
+        
+        ensure_requirements_installed(owner, folder)
+        
+        set_state(key, "Starting")
+        log_append(key, "[SYSTEM] Starting...\n")
+        
+        proc, logf = start_project(owner, folder, startup_file)
+        running_procs[key] = (proc, logf)
+        
+        time.sleep(2.0)
+        if proc.poll() is None:
+            set_state(key, "Running")
+        else:
+            set_state(key, "Offline")
+    except Exception as e:
+        log_append(key, f"[SYSTEM] Start failed: {e}\n")
+        set_state(key, "Offline")
+
+
 @app.route("/")
 @login_required
 def home():
@@ -445,19 +559,14 @@ def logout():
     return redirect("/login")
 
 
-# ---------------------------
-# Auth APIs
-# ---------------------------
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
-
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         session["user"] = {"username": ADMIN_USERNAME, "is_admin": True}
         return jsonify({"success": True, "is_admin": True})
-
     db = load_users()
     u = find_user(db, username)
     if not u:
@@ -466,7 +575,6 @@ def api_login():
         return jsonify({"success": False, "message": "Account is banned / inactive"}), 403
     if not check_password_hash(u.get("password_hash", ""), password):
         return jsonify({"success": False, "message": "Invalid username or password"}), 401
-
     session["user"] = {"username": u.get("username"), "is_admin": False}
     ensure_user_dirs(u.get("username"))
     return jsonify({"success": True, "is_admin": False})
@@ -479,7 +587,6 @@ def api_create():
     email = (data.get("email") or "").strip()
     password = data.get("password") or ""
     password2 = data.get("password2") or ""
-
     if not username or len(username) < 3:
         return jsonify({"success": False, "message": "Username must be at least 3 chars"}), 400
     if not re.fullmatch(r"[A-Za-z0-9_\.]+", username):
@@ -492,11 +599,9 @@ def api_create():
         return jsonify({"success": False, "message": "Password must be at least 6 chars"}), 400
     if password != password2:
         return jsonify({"success": False, "message": "Passwords do not match"}), 400
-
     db = load_users()
     if find_user(db, username):
         return jsonify({"success": False, "message": "Username already exists"}), 409
-
     db["users"].append({
         "username": username,
         "email": email,
@@ -509,14 +614,10 @@ def api_create():
     return jsonify({"success": True})
 
 
-# ---------------------------
-# ✅ Server listing (per-user) + admin sees all
-# ---------------------------
 def list_all_servers_for_admin():
     servers = []
     if not os.path.isdir(USERS_ROOT):
         return servers
-
     for owner in sorted(os.listdir(USERS_ROOT)):
         root = get_user_servers_root(owner)
         if not os.path.isdir(root):
@@ -536,7 +637,8 @@ def list_all_servers_for_admin():
                 "key": key,
                 "subtitle": f"Owner: {owner}",
                 "startup_file": meta.get("startup_file", ""),
-                "status": st
+                "status": st,
+                "port": meta.get("port", 5000)
             })
     return servers
 
@@ -551,7 +653,7 @@ def list_servers_for_user(username: str):
             continue
         meta = read_meta(username, folder)
         banned = bool(meta.get("banned", False))
-        key = folder  # ✅ user only uses folder
+        key = folder
         st = "Banned" if banned else get_state(key)
         servers.append({
             "title": meta.get("display_name", folder),
@@ -560,7 +662,8 @@ def list_servers_for_user(username: str):
             "key": key,
             "subtitle": f"Owner: {username}",
             "startup_file": meta.get("startup_file", ""),
-            "status": st
+            "status": st,
+            "port": meta.get("port", 5000)
         })
     return servers
 
@@ -581,67 +684,52 @@ def add_server():
     folder = sanitize_folder_name(name)
     if not folder:
         return jsonify({"success": False, "message": "Invalid server name"}), 400
-
     if is_admin_session():
-        # admin creates under ADMIN username by default (can manage from admin panel anyway)
         owner = current_username()
     else:
         owner = current_username()
-
     ensure_user_dirs(owner)
-
-    # enforce limits for non-admin
     if not is_admin_session():
         limit = get_user_limit(owner)
         existing = [d for d in os.listdir(get_user_servers_root(owner)) if os.path.isdir(get_server_dir(owner, d))]
         if len(existing) >= limit:
             return jsonify({"success": False, "message": f"Server limit reached ({limit}). Ask admin for premium."}), 403
-
     target = get_server_dir(owner, folder)
     if os.path.exists(target):
         return jsonify({"success": False, "message": "Server already exists"}), 409
-
     os.makedirs(target, exist_ok=True)
     open(os.path.join(target, "server.log"), "w", encoding="utf-8").close()
-
     meta = {
         "display_name": name or folder,
         "startup_file": "",
         "owner": owner,
-        "banned": False
+        "banned": False,
+        "port": 5000,
+        "custom_domain": "",
+        "is_flask": False
     }
     write_meta(owner, folder, meta)
-
     set_state(folder if not is_admin_session() else f"{owner}::{folder}", "Offline")
-
-    # return list
     if is_admin_session():
         return jsonify({"success": True, "servers": list_all_servers_for_admin()})
     return jsonify({"success": True, "servers": list_servers_for_user(owner)})
 
 
-# ---------------------------
-# Server control + stats
-# ---------------------------
 @app.route("/server/stats/<path:key>")
 @login_required
 def server_stats(key):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden"}), 403
-
     owner, folder = parse_server_key(key, allow_admin=True)
     server_dir = get_server_dir(owner, folder)
     if not os.path.isdir(server_dir):
-        return jsonify({"status": "Offline", "cpu": "0%", "mem": "0 MB", "logs": "", "ip": get_ip()}), 404
-
+        return jsonify({"status": "Offline", "cpu": "0%", "mem": "0 MB", "logs": "", "ip": get_ip(), "port": 5000, "url": ""}), 404
     meta = read_meta(owner, folder)
     if meta.get("banned", False):
         set_state(key, "Banned")
-
     proc_tuple = running_procs.get(key)
     running = False
     cpu, mem = "0%", "0 MB"
-
     if proc_tuple:
         proc, _logf = proc_tuple
         if psutil.pid_exists(proc.pid):
@@ -653,13 +741,11 @@ def server_stats(key):
                     mem = f"{p.memory_info().rss / 1024 / 1024:.1f} MB"
             except Exception:
                 pass
-
     log_path = os.path.join(server_dir, "server.log")
     try:
         logs = open(log_path, "r", encoding="utf-8", errors="ignore").read() if os.path.exists(log_path) else ""
     except Exception:
         logs = ""
-
     state = get_state(key)
     if meta.get("banned", False):
         state = "Banned"
@@ -669,31 +755,17 @@ def server_stats(key):
     elif state not in ("Installing", "Starting"):
         state = "Offline"
         set_state(key, "Offline")
-
-    return jsonify({"status": state, "cpu": cpu, "mem": mem, "logs": logs, "ip": get_ip()})
-
-
-def background_start(key: str, owner: str, folder: str, startup_file: str):
-    try:
-        set_state(key, "Installing")
-        log_append(key, "[SYSTEM] Preparing...\n")
-
-        ensure_requirements_installed(owner, folder)
-
-        set_state(key, "Starting")
-        log_append(key, "[SYSTEM] Starting...\n")
-
-        proc, logf = start_with_autoinstall(owner, folder, startup_file)
-        running_procs[key] = (proc, logf)
-
-        time.sleep(1.0)
-        if proc.poll() is None:
-            set_state(key, "Running")
-        else:
-            set_state(key, "Offline")
-    except Exception as e:
-        log_append(key, f"[SYSTEM] Start failed: {e}\n")
-        set_state(key, "Offline")
+    port = meta.get("port", 5000)
+    url = get_server_url(owner, folder) if state == "Running" else ""
+    return jsonify({
+        "status": state,
+        "cpu": cpu,
+        "mem": mem,
+        "logs": logs,
+        "ip": get_ip(),
+        "port": port,
+        "url": url
+    })
 
 
 @app.route("/server/action/<path:key>/<act>", methods=["POST"])
@@ -701,30 +773,23 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
 def server_action(key, act):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden"}), 403
-
     owner, folder = parse_server_key(key, allow_admin=True)
     server_dir = get_server_dir(owner, folder)
     if not os.path.isdir(server_dir):
         return jsonify({"success": False, "message": "Server not found"}), 404
-
     meta = read_meta(owner, folder)
     if meta.get("banned", False):
         set_state(key, "Banned")
         return jsonify({"success": False, "message": "Server is banned by admin"}), 403
-
     if act in ("stop", "restart"):
         stop_proc(key)
         set_state(key, "Offline")
-
     if act == "stop":
         return jsonify({"success": True})
-
     startup = meta.get("startup_file") or ""
     if not startup:
         return jsonify({"success": False, "message": "No main file set"}), 400
-
     open(os.path.join(server_dir, "server.log"), "w", encoding="utf-8").close()
-
     t = threading.Thread(target=background_start, args=(key, owner, folder, startup), daemon=True)
     t.start()
     return jsonify({"success": True})
@@ -735,12 +800,10 @@ def server_action(key, act):
 def set_startup(key):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden"}), 403
-
     owner, folder = parse_server_key(key, allow_admin=True)
     server_dir = get_server_dir(owner, folder)
     if not os.path.isdir(server_dir):
         return jsonify({"success": False, "message": "Server not found"}), 404
-
     data = request.get_json(silent=True) or {}
     f = (data.get("file") or "").strip()
     meta = read_meta(owner, folder)
@@ -749,21 +812,32 @@ def set_startup(key):
     return jsonify({"success": True})
 
 
-# ---------------------------
-# File manager APIs
-# ---------------------------
+@app.route("/server/set-port/<path:key>", methods=["POST"])
+@login_required
+def set_server_port(key):
+    if not can_access_key(key):
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    new_port = data.get("port")
+    if not isinstance(new_port, int) or new_port < 1024 or new_port > 65535:
+        return jsonify({"success": False, "message": "Port must be between 1024 and 65535"}), 400
+    owner, folder = parse_server_key(key, allow_admin=True)
+    meta = read_meta(owner, folder)
+    meta["port"] = new_port
+    write_meta(owner, folder, meta)
+    return jsonify({"success": True, "port": new_port})
+
+
 @app.route("/files/list/<path:key>")
 @login_required
 def files_list(key):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden", "path": ""}), 403
-
     rel = request.args.get("path", "") or ""
     try:
         base = safe_join_server_path(key, rel)
     except Exception:
         return jsonify({"success": False, "message": "Invalid path", "path": ""}), 400
-
     dirs, files = [], []
     if os.path.isdir(base):
         for name in sorted(os.listdir(base), key=lambda x: (not os.path.isdir(os.path.join(base, x)), x.lower())):
@@ -779,7 +853,6 @@ def files_list(key):
                 except Exception:
                     size = ""
                 files.append({"name": name, "size": size})
-
     return jsonify({"success": True, "path": rel, "dirs": dirs, "files": files})
 
 
@@ -807,16 +880,13 @@ def file_content(key):
 def file_save(key):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden"}), 403
-
     data = request.get_json(silent=True) or {}
     file_rel = data.get("file", "") or ""
     content = data.get("content", "")
-
     try:
         full = safe_join_server_path(key, file_rel)
     except Exception:
         return jsonify({"success": False, "message": "Invalid path"}), 400
-
     os.makedirs(os.path.dirname(full), exist_ok=True)
     try:
         with open(full, "w", encoding="utf-8") as f:
@@ -893,14 +963,12 @@ def file_delete(key):
 def file_upload(key):
     if not can_access_key(key):
         return jsonify({"success": False, "message": "Forbidden"}), 403
-
     rel = request.args.get("path", "") or ""
     try:
         base_dir = safe_join_server_path(key, rel)
     except Exception:
         return jsonify({"success": False, "message": "Invalid path"}), 400
     os.makedirs(base_dir, exist_ok=True)
-
     files = request.files.getlist("files") or []
     if not files:
         one = request.files.get("file")
@@ -908,19 +976,15 @@ def file_upload(key):
             files = [one]
     if not files:
         return jsonify({"success": False, "message": "No file"}), 400
-
     relpaths = request.form.getlist("relpaths")
     saved = 0
-
     for i, f in enumerate(files):
         if not f or not f.filename:
             continue
         filename = os.path.basename(f.filename)
-
         rp = ""
         if relpaths and i < len(relpaths):
             rp = (relpaths[i] or "").replace("\\", "/").lstrip("/")
-
         try:
             if rp:
                 target_dir = safe_join_server_path(key, os.path.join(rel, os.path.dirname(rp)))
@@ -928,17 +992,12 @@ def file_upload(key):
                 target_dir = base_dir
         except Exception:
             continue
-
         os.makedirs(target_dir, exist_ok=True)
         f.save(os.path.join(target_dir, filename))
         saved += 1
-
     return jsonify({"success": True, "saved": saved})
 
 
-# ---------------------------
-# Admin APIs (unchanged logic, now uses USERS/)
-# ---------------------------
 @app.route("/api/admin/servers")
 @admin_required
 def admin_servers():
@@ -951,16 +1010,13 @@ def admin_server_ban():
     data = request.get_json(silent=True) or {}
     key = (data.get("key") or "").strip()
     banned = bool(data.get("banned", True))
-
     owner, folder = parse_server_key(key, allow_admin=True)
     server_dir = get_server_dir(owner, folder)
     if not os.path.isdir(server_dir):
         return jsonify({"success": False, "message": "Server not found"}), 404
-
     meta = read_meta(owner, folder)
     meta["banned"] = banned
     write_meta(owner, folder, meta)
-
     if banned:
         stop_proc(key)
         set_state(key, "Banned")
@@ -968,7 +1024,6 @@ def admin_server_ban():
     else:
         set_state(key, "Offline")
         log_append(key, "[ADMIN] Server unbanned.\n")
-
     return jsonify({"success": True})
 
 
@@ -976,14 +1031,12 @@ def admin_server_ban():
 @admin_required
 def admin_users():
     db = load_users()
-
     counts = {}
     if os.path.isdir(USERS_ROOT):
         for owner in os.listdir(USERS_ROOT):
             root = get_user_servers_root(owner)
             if os.path.isdir(root):
                 counts[owner] = len([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
-
     users = []
     for u in db.get("users", []):
         users.append({
@@ -1003,17 +1056,14 @@ def admin_user_update():
     username = (data.get("username") or "").strip()
     if not username:
         return jsonify({"success": False, "message": "Username required"}), 400
-
     db = load_users()
     u = find_user(db, username)
     if not u:
         return jsonify({"success": False, "message": "User not found"}), 404
-
     if "active" in data:
         u["active"] = bool(data["active"])
     if "premium" in data:
         u["premium"] = bool(data["premium"])
-
     save_users(db)
     return jsonify({"success": True})
 
@@ -1025,7 +1075,6 @@ def admin_quickstats():
     running = 0
     installing = 0
     banned = 0
-
     for s in list_all_servers_for_admin():
         total_servers += 1
         if s.get("status") == "Banned":
@@ -1034,12 +1083,10 @@ def admin_quickstats():
             running += 1
         elif s.get("status") in ("Installing", "Starting"):
             installing += 1
-
     db = load_users()
     total_users = len(db.get("users", []))
     active_users = sum(1 for u in db.get("users", []) if u.get("active", True))
     premium_users = sum(1 for u in db.get("users", []) if u.get("premium", False))
-
     return jsonify({"success": True, "stats": {
         "servers_total": total_servers,
         "servers_running": running,
