@@ -8,9 +8,10 @@ import subprocess
 import threading
 import time
 import sys
+import requests
 
 import psutil
-from flask import Flask, send_from_directory, request, jsonify, redirect, session
+from flask import Flask, send_from_directory, request, jsonify, redirect, session, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 
@@ -31,8 +32,24 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "1211")
 
 running_procs = {}
 server_states = {}
+server_ports = {}  # حفظ المنفذ لكل مشروع
 lock = threading.Lock()
 
+# كشف بيئة التشغيل
+IS_RAILWAY = "RAILWAY_ENVIRONMENT" in os.environ or "RAILWAY_STATIC_URL" in os.environ
+IS_RENDER = "RENDER" in os.environ
+IS_HEROKU = "DYNO" in os.environ
+IS_CLOUD = IS_RAILWAY or IS_RENDER or IS_HEROKU
+
+def get_base_url():
+    """الحصول على الرابط الأساسي للمنصة"""
+    if IS_RAILWAY and os.environ.get("RAILWAY_STATIC_URL"):
+        return f"https://{os.environ['RAILWAY_STATIC_URL']}"
+    if IS_RENDER and os.environ.get("RENDER_EXTERNAL_URL"):
+        return os.environ["RENDER_EXTERNAL_URL"]
+    if IS_HEROKU and os.environ.get("HEROKU_APP_NAME"):
+        return f"https://{os.environ['HEROKU_APP_NAME']}.herokuapp.com"
+    return None
 
 def get_ip():
     try:
@@ -44,6 +61,11 @@ def get_ip():
     except Exception:
         return "127.0.0.1"
 
+def get_hostname():
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "localhost"
 
 def sanitize_folder_name(name: str) -> str:
     name = (name or "").strip()
@@ -51,23 +73,27 @@ def sanitize_folder_name(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9\-_\.]", "", name)
     return name[:200]
 
-
 def safe_name(name: str) -> str:
     name = (name or "").strip()
     name = re.sub(r"[\\/]+", "", name)
     name = re.sub(r"[^A-Za-z0-9\-_\. ]", "", name)
     return name[:200].strip()
 
-
 def set_state(key: str, state: str):
     with lock:
         server_states[key] = state
-
 
 def get_state(key: str) -> str:
     with lock:
         return server_states.get(key, "Offline")
 
+def set_server_port(key: str, port: int):
+    with lock:
+        server_ports[key] = port
+
+def get_server_port(key: str) -> int:
+    with lock:
+        return server_ports.get(key, 0)
 
 def log_append(key: str, text: str):
     try:
@@ -78,7 +104,6 @@ def log_append(key: str, text: str):
     except Exception:
         pass
 
-
 def load_users():
     if not os.path.exists(USERS_DB):
         return {"users": []}
@@ -88,13 +113,11 @@ def load_users():
     except Exception:
         return {"users": []}
 
-
 def save_users(db):
     tmp = USERS_DB + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(db, f, indent=2)
     os.replace(tmp, USERS_DB)
-
 
 def find_user(db, username: str):
     u = (username or "").strip().lower()
@@ -103,16 +126,13 @@ def find_user(db, username: str):
             return x
     return None
 
-
 def is_admin_session():
     u = session.get("user") or {}
     return bool(u.get("is_admin"))
 
-
 def current_username():
     u = session.get("user") or {}
     return (u.get("username") or "").strip()
-
 
 def get_user_limit(username: str) -> int:
     if is_admin_session():
@@ -123,7 +143,6 @@ def get_user_limit(username: str) -> int:
         return 1
     return 16 if u.get("premium", False) else 1
 
-
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -131,7 +150,6 @@ def login_required(fn):
             return redirect("/login")
         return fn(*args, **kwargs)
     return wrapper
-
 
 def admin_required(fn):
     @wraps(fn)
@@ -143,18 +161,14 @@ def admin_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
-
 def get_user_servers_root(username: str) -> str:
     return os.path.join(USERS_ROOT, username, "servers")
-
 
 def get_server_dir(owner: str, folder: str) -> str:
     return os.path.join(get_user_servers_root(owner), folder)
 
-
 def ensure_user_dirs(username: str):
     os.makedirs(get_user_servers_root(username), exist_ok=True)
-
 
 def parse_server_key(key: str, allow_admin: bool):
     key = (key or "").strip()
@@ -169,7 +183,6 @@ def parse_server_key(key: str, allow_admin: bool):
         return owner, folder
     return current_username(), key
 
-
 def can_access_key(key: str) -> bool:
     try:
         owner, folder = parse_server_key(key, allow_admin=True)
@@ -178,7 +191,6 @@ def can_access_key(key: str) -> bool:
     if is_admin_session():
         return True
     return owner == current_username()
-
 
 def safe_join_server_path(key: str, rel_path: str = "") -> str:
     owner, folder = parse_server_key(key, allow_admin=True)
@@ -190,7 +202,6 @@ def safe_join_server_path(key: str, rel_path: str = "") -> str:
     if not (joined == root or joined.startswith(root + os.sep)):
         raise ValueError("Invalid path")
     return joined
-
 
 def ensure_meta(owner: str, folder: str):
     server_dir = get_server_dir(owner, folder)
@@ -227,7 +238,6 @@ def ensure_meta(owner: str, folder: str):
                 json.dump(m, f, indent=2)
     return meta_path
 
-
 def read_meta(owner: str, folder: str):
     ensure_meta(owner, folder)
     meta_path = os.path.join(get_server_dir(owner, folder), "meta.json")
@@ -237,12 +247,10 @@ def read_meta(owner: str, folder: str):
     except Exception:
         return {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "custom_domain": "", "is_flask": False}
 
-
 def write_meta(owner: str, folder: str, meta):
     meta_path = os.path.join(get_server_dir(owner, folder), "meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-
 
 def sha256_file(path):
     h = hashlib.sha256()
@@ -251,10 +259,8 @@ def sha256_file(path):
             h.update(chunk)
     return h.hexdigest()
 
-
 def installed_file_path(owner: str, folder: str):
     return os.path.join(get_server_dir(owner, folder), ".installed")
-
 
 def read_installed(owner: str, folder: str):
     p = installed_file_path(owner, folder)
@@ -275,7 +281,6 @@ def read_installed(owner: str, folder: str):
         pass
     return data
 
-
 def write_installed(owner: str, folder: str, req_sha=None, add_pkgs=None):
     p = installed_file_path(owner, folder)
     cur = read_installed(owner, folder)
@@ -289,7 +294,6 @@ def write_installed(owner: str, folder: str, req_sha=None, add_pkgs=None):
     lines.extend(sorted(cur["pkgs"]))
     with open(p, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + ("\n" if lines else ""))
-
 
 def ensure_requirements_installed(owner: str, folder: str):
     server_dir = get_server_dir(owner, folder)
@@ -309,7 +313,6 @@ def ensure_requirements_installed(owner: str, folder: str):
     except subprocess.CalledProcessError as e:
         log_append(f"{owner}::{folder}", f"[SYSTEM] requirements install failed: {e}\n")
         return False
-
 
 def detect_or_set_port(owner: str, folder: str, startup_file: str) -> int:
     meta = read_meta(owner, folder)
@@ -333,16 +336,24 @@ def detect_or_set_port(owner: str, folder: str, startup_file: str) -> int:
     write_meta(owner, folder, meta)
     return default_port
 
-
 def get_server_url(owner: str, folder: str) -> str:
+    """إرجاع الرابط (يدعم الوكيل العكسي في المنصات السحابية)"""
     meta = read_meta(owner, folder)
     port = meta.get("port", 5000)
-    server_ip = get_ip()
     custom_domain = meta.get("custom_domain", "")
+    key = f"{owner}::{folder}" if is_admin_session() else folder
+    
     if custom_domain:
-        return f"http://{custom_domain}"
-    return f"http://{server_ip}:{port}"
-
+        return f"http://{custom_domain}:{port}"
+    
+    # إذا كنا في منصة سحابية، استخدم مسار الوكيل
+    base_url = get_base_url()
+    if base_url:
+        return f"{base_url}/proxy/{key}"
+    
+    # في Termux أو VPS عادي، استخدم hostname والمنفذ المباشر
+    hostname = get_hostname()
+    return f"http://{hostname}:{port}"
 
 def start_with_autoinstall(owner: str, folder: str, startup_file: str):
     wrapper_code = r'''
@@ -405,9 +416,7 @@ while True:
     )
     return proc, log_file
 
-
 def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
-    """تشغيل مشروع Flask بشكل صحيح مع auto install"""
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
@@ -416,7 +425,6 @@ def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
     env["FLASK_APP"] = startup_file
     env["FLASK_ENV"] = "production"
     
-    # استخدام flask run بدلاً من python مباشرة
     proc = subprocess.Popen(
         [sys.executable, "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
         cwd=server_dir,
@@ -426,9 +434,7 @@ def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
     )
     return proc, log_file
 
-
 def run_web_project(owner: str, folder: str, startup_file: str, port: int):
-    """تشغيل مشروع ويب عادي (FastAPI, Django, etc)"""
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
@@ -443,12 +449,10 @@ def run_web_project(owner: str, folder: str, startup_file: str, port: int):
     )
     return proc, log_file
 
-
 def start_project(owner: str, folder: str, startup_file: str):
     server_dir = get_server_dir(owner, folder)
     startup_path = os.path.join(server_dir, startup_file)
     
-    # كشف نوع المشروع
     is_flask = False
     is_fastapi = False
     is_django = False
@@ -468,12 +472,10 @@ def start_project(owner: str, folder: str, startup_file: str):
         log_append(f"{owner}::{folder}", f"[SYSTEM] Flask project detected. Using port {port}\n")
         log_append(f"{owner}::{folder}", f"[SYSTEM] Access at: {get_server_url(owner, folder)}\n")
         
-        # تحديث meta للإشارة إلى أنه مشروع Flask
         meta = read_meta(owner, folder)
         meta["is_flask"] = True
         write_meta(owner, folder, meta)
         
-        # تثبيت Flask إذا لم يكن موجوداً
         ensure_requirements_installed(owner, folder)
         
         return run_flask_project(owner, folder, startup_file, port)
@@ -487,7 +489,6 @@ def start_project(owner: str, folder: str, startup_file: str):
     else:
         log_append(f"{owner}::{folder}", "[SYSTEM] Bot/script detected (using auto-install)\n")
         return start_with_autoinstall(owner, folder, startup_file)
-
 
 def stop_proc(key: str):
     if key in running_procs:
@@ -504,7 +505,6 @@ def stop_proc(key: str):
         except Exception:
             pass
         running_procs.pop(key, None)
-
 
 def background_start(key: str, owner: str, folder: str, startup_file: str):
     try:
@@ -529,21 +529,71 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         set_state(key, "Offline")
 
 
+# =============== PROXY ROUTE ===============
+@app.route("/proxy/<path:key>")
+@app.route("/proxy/<path:key>/")
+@app.route("/proxy/<path:key>/<path:subpath>")
+def proxy_project(key, subpath=""):
+    """يعرض محتوى المشروع الداخلي عبر الوكيل العكسي"""
+    if not can_access_key(key):
+        return "Forbidden", 403
+    
+    owner, folder = parse_server_key(key, allow_admin=True)
+    meta = read_meta(owner, folder)
+    
+    if meta.get("banned", False):
+        return "Server banned", 403
+    
+    state = get_state(key)
+    if state != "Running":
+        return "Server not running", 404
+    
+    port = meta.get("port", 5000)
+    
+    # بناء الرابط الداخلي
+    target_url = f"http://localhost:{port}/{subpath}"
+    if subpath and not subpath.endswith('/') and request.query_string:
+        target_url += f"?{request.query_string.decode()}"
+    elif request.query_string:
+        target_url += f"?{request.query_string.decode()}"
+    
+    try:
+        # إعادة توجيه الطلب إلى المشروع الداخلي
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers={k: v for k, v in request.headers if k.lower() != 'host'},
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        # إرجاع الاستجابة
+        return Response(
+            resp.content,
+            status=resp.status_code,
+            headers=dict(resp.headers)
+        )
+    except requests.exceptions.ConnectionError:
+        return "Project not reachable", 502
+    except Exception as e:
+        return f"Proxy error: {e}", 500
+
+
+# =============== PAGE ROUTES ===============
 @app.route("/")
 @login_required
 def home():
     return send_from_directory(BASE_DIR, "index.html")
 
-
 @app.route("/login")
 def login_page():
     return send_from_directory(BASE_DIR, "login.html")
 
-
 @app.route("/create")
 def create_page():
     return send_from_directory(BASE_DIR, "create.html")
-
 
 @app.route("/admin")
 @login_required
@@ -552,13 +602,13 @@ def admin_page():
         return redirect("/")
     return send_from_directory(BASE_DIR, "admin.html")
 
-
 @app.route("/logout")
 def logout():
     session.pop("user", None)
     return redirect("/login")
 
 
+# =============== AUTH APIS ===============
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
     data = request.get_json(silent=True) or {}
@@ -578,7 +628,6 @@ def api_login():
     session["user"] = {"username": u.get("username"), "is_admin": False}
     ensure_user_dirs(u.get("username"))
     return jsonify({"success": True, "is_admin": False})
-
 
 @app.route("/api/auth/create", methods=["POST"])
 def api_create():
@@ -614,6 +663,7 @@ def api_create():
     return jsonify({"success": True})
 
 
+# =============== SERVER LISTING ===============
 def list_all_servers_for_admin():
     servers = []
     if not os.path.isdir(USERS_ROOT):
@@ -642,7 +692,6 @@ def list_all_servers_for_admin():
             })
     return servers
 
-
 def list_servers_for_user(username: str):
     ensure_user_dirs(username)
     root = get_user_servers_root(username)
@@ -667,14 +716,12 @@ def list_servers_for_user(username: str):
         })
     return servers
 
-
 @app.route("/servers")
 @login_required
 def servers():
     if is_admin_session():
         return jsonify({"success": True, "servers": list_all_servers_for_admin()})
     return jsonify({"success": True, "servers": list_servers_for_user(current_username())})
-
 
 @app.route("/add", methods=["POST"])
 @login_required
@@ -715,6 +762,7 @@ def add_server():
     return jsonify({"success": True, "servers": list_servers_for_user(owner)})
 
 
+# =============== SERVER CONTROL ===============
 @app.route("/server/stats/<path:key>")
 @login_required
 def server_stats(key):
@@ -767,7 +815,6 @@ def server_stats(key):
         "url": url
     })
 
-
 @app.route("/server/action/<path:key>/<act>", methods=["POST"])
 @login_required
 def server_action(key, act):
@@ -794,7 +841,6 @@ def server_action(key, act):
     t.start()
     return jsonify({"success": True})
 
-
 @app.route("/server/set-startup/<path:key>", methods=["POST"])
 @login_required
 def set_startup(key):
@@ -810,7 +856,6 @@ def set_startup(key):
     meta["startup_file"] = f
     write_meta(owner, folder, meta)
     return jsonify({"success": True})
-
 
 @app.route("/server/set-port/<path:key>", methods=["POST"])
 @login_required
@@ -828,6 +873,7 @@ def set_server_port(key):
     return jsonify({"success": True, "port": new_port})
 
 
+# =============== FILE MANAGER ===============
 @app.route("/files/list/<path:key>")
 @login_required
 def files_list(key):
@@ -855,7 +901,6 @@ def files_list(key):
                 files.append({"name": name, "size": size})
     return jsonify({"success": True, "path": rel, "dirs": dirs, "files": files})
 
-
 @app.route("/files/content/<path:key>")
 @login_required
 def file_content(key):
@@ -873,7 +918,6 @@ def file_content(key):
             return jsonify({"content": f.read()})
     except Exception:
         return jsonify({"content": ""})
-
 
 @app.route("/files/save/<path:key>", methods=["POST"])
 @login_required
@@ -895,7 +939,6 @@ def file_save(key):
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-
 @app.route("/files/mkdir/<path:key>", methods=["POST"])
 @login_required
 def file_mkdir(key):
@@ -915,7 +958,6 @@ def file_mkdir(key):
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-
 @app.route("/files/rename/<path:key>", methods=["POST"])
 @login_required
 def file_rename(key):
@@ -934,7 +976,6 @@ def file_rename(key):
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
-
 
 @app.route("/files/delete/<path:key>", methods=["POST"])
 @login_required
@@ -956,7 +997,6 @@ def file_delete(key):
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
-
 
 @app.route("/files/upload/<path:key>", methods=["POST"])
 @login_required
@@ -998,11 +1038,11 @@ def file_upload(key):
     return jsonify({"success": True, "saved": saved})
 
 
+# =============== ADMIN APIS ===============
 @app.route("/api/admin/servers")
 @admin_required
 def admin_servers():
     return jsonify({"success": True, "servers": list_all_servers_for_admin()})
-
 
 @app.route("/api/admin/server/ban", methods=["POST"])
 @admin_required
@@ -1026,7 +1066,6 @@ def admin_server_ban():
         log_append(key, "[ADMIN] Server unbanned.\n")
     return jsonify({"success": True})
 
-
 @app.route("/api/admin/users")
 @admin_required
 def admin_users():
@@ -1048,7 +1087,6 @@ def admin_users():
         })
     return jsonify({"success": True, "users": users})
 
-
 @app.route("/api/admin/user/update", methods=["POST"])
 @admin_required
 def admin_user_update():
@@ -1066,7 +1104,6 @@ def admin_user_update():
         u["premium"] = bool(data["premium"])
     save_users(db)
     return jsonify({"success": True})
-
 
 @app.route("/api/admin/quickstats")
 @admin_required
