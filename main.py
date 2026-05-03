@@ -465,25 +465,25 @@ while True:
 
 
 def run_flask_project(owner: str, folder: str, startup_file: str, port: int):
-    """تشغيل مشروع Flask بشكل صحيح مع دعم Railway"""
+    """تشغيل مشروع Flask باستخدام Gunicorn (لـ Railway و VPS و Termux)"""
     server_dir = get_server_dir(owner, folder)
     log_path = os.path.join(server_dir, "server.log")
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
     env = os.environ.copy()
     env["PORT"] = str(port)
-    env["FLASK_APP"] = startup_file
-    env["FLASK_ENV"] = "production"
-    env["FLASK_RUN_HOST"] = "0.0.0.0"
-    env["FLASK_RUN_PORT"] = str(port)
     
-    # تأكد من أن Flask يستمع على 0.0.0.0
+    # إزالة .py من اسم الملف للحصول على اسم الموديول
+    module_name = startup_file.replace('.py', '')
+    
+    # تشغيل Flask باستخدام gunicorn
     proc = subprocess.Popen(
-        [sys.executable, "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
+        [sys.executable, "-m", "gunicorn", f"--bind=0.0.0.0:{port}", f"{module_name}:app"],
         cwd=server_dir,
         stdout=log_file,
         stderr=log_file,
         env=env
     )
+    log_append(f"{owner}::{folder}", f"[SYSTEM] Flask project starting with gunicorn on port {port}\n")
     return proc, log_file
 
 
@@ -494,6 +494,33 @@ def run_web_project(owner: str, folder: str, startup_file: str, port: int):
     log_file = open(log_path, "a", encoding="utf-8", errors="ignore")
     env = os.environ.copy()
     env["PORT"] = str(port)
+    
+    # FastAPI يحتاج uvicorn
+    if "FastAPI" in open(os.path.join(server_dir, startup_file), "r", encoding="utf-8", errors="ignore").read():
+        module_name = startup_file.replace('.py', '')
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", f"{module_name}:app", f"--host=0.0.0.0", f"--port={port}"],
+            cwd=server_dir,
+            stdout=log_file,
+            stderr=log_file,
+            env=env
+        )
+        log_append(f"{owner}::{folder}", f"[SYSTEM] FastAPI project starting with uvicorn on port {port}\n")
+        return proc, log_file
+    
+    # Django
+    if "django" in open(os.path.join(server_dir, startup_file), "r", encoding="utf-8", errors="ignore").read().lower():
+        proc = subprocess.Popen(
+            [sys.executable, "manage.py", "runserver", f"0.0.0.0:{port}"],
+            cwd=server_dir,
+            stdout=log_file,
+            stderr=log_file,
+            env=env
+        )
+        log_append(f"{owner}::{folder}", f"[SYSTEM] Django project starting on port {port}\n")
+        return proc, log_file
+    
+    # مشروع عادي
     proc = subprocess.Popen(
         [sys.executable, startup_file],
         cwd=server_dir,
@@ -576,7 +603,7 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         proc, logf = start_project(owner, folder, startup_file)
         running_procs[key] = (proc, logf)
         
-        time.sleep(3.0)  # انتظر 3 ثواني عشان يتأكد إن العملية اشتغلت
+        time.sleep(3.0)
         if proc.poll() is None:
             set_state(key, "Running")
             log_append(key, "[SYSTEM] Project started successfully ✅\n")
@@ -608,7 +635,6 @@ def proxy_project(key, subpath=""):
     
     port = meta.get("port", 5000)
     
-    # بناء الرابط الداخلي
     target_url = f"http://localhost:{port}/{subpath}"
     if subpath and not subpath.endswith('/') and request.query_string:
         target_url += f"?{request.query_string.decode()}"
@@ -616,7 +642,6 @@ def proxy_project(key, subpath=""):
         target_url += f"?{request.query_string.decode()}"
     
     try:
-        # توجيه الطلب إلى المشروع الداخلي
         headers = {k: v for k, v in request.headers if k.lower() != 'host'}
         resp = requests.request(
             method=request.method,
@@ -628,7 +653,6 @@ def proxy_project(key, subpath=""):
             timeout=30
         )
         
-        # إرجاع الاستجابة
         return Response(
             resp.content,
             status=resp.status_code,
@@ -1222,5 +1246,4 @@ if __name__ == "__main__":
         print(f"\n🚀 الرابط العام لموقعك: {public_url}")
     else:
         print(f"\n⚠️  لا يمكن الحصول على رابط عام، جرب تشغيل Ngrok")
-    print(f"📍 المنصة: {'Railway' if os.environ.get('RAILWAY_STATIC_URL') else 'VPS/Termux'}")
     app.run(host="0.0.0.0", port=port)
