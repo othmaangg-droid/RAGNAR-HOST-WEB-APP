@@ -10,13 +10,14 @@ import time
 import sys
 
 import psutil
-from flask import Flask, send_from_directory, request, jsonify, redirect, session
+import requests
+from flask import Flask, send_from_directory, request, jsonify, redirect, session, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ✅ NEW: per-user root
+# ✅ per-user root
 USERS_ROOT = os.path.join(BASE_DIR, "USERS")
 DATA_DIR = os.path.join(BASE_DIR, "DATA")
 USERS_DB = os.path.join(DATA_DIR, "users.json")
@@ -35,6 +36,28 @@ server_states = {}
 lock = threading.Lock()
 
 
+# ================= دعم Railway والمنصات السحابية =================
+def is_railway():
+    """التحقق مما إذا كان الكود يعمل على Railway"""
+    return os.environ.get("RAILWAY_STATIC_URL") is not None
+
+def get_public_base_url():
+    """الحصول على الرابط العام للمنصة (لـ Railway، Render، إلخ)"""
+    railway_url = os.environ.get("RAILWAY_STATIC_URL")
+    if railway_url:
+        return f"https://{railway_url}"
+    
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        return render_url
+    
+    heroku_url = os.environ.get("HEROKU_APP_NAME")
+    if heroku_url:
+        return f"https://{heroku_url}.herokuapp.com"
+    
+    # في حالة VPS أو Termux، نرجع None
+    return None
+
 def get_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -44,6 +67,22 @@ def get_ip():
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def get_project_url(owner: str, folder: str, port: int) -> str:
+    """
+    بناء الرابط الصحيح للمشروع.
+    - على Railway: https://اسم-التطبيق.railway.app/proxy/owner/folder
+    - على VPS/Termux: http://IP:PORT
+    """
+    public_base = get_public_base_url()
+    
+    if public_base:
+        # على Railway: https://اسم-التطبيق.railway.app/proxy/owner/folder
+        return f"{public_base}/proxy/{owner}/{folder}"
+    else:
+        # على VPS أو Termux محلياً: http://192.168.x.x:port
+        return f"http://{get_ip()}:{port}"
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -152,7 +191,7 @@ def admin_required(fn):
 
 
 # ---------------------------
-# ✅ Per-user server directories
+# Per-user server directories
 # ---------------------------
 def get_user_servers_root(username: str) -> str:
     return os.path.join(USERS_ROOT, username, "servers")
@@ -409,6 +448,7 @@ def start_web_project(owner: str, folder: str, startup_file: str):
     
     port = detect_flask_port(startup_path)
     
+    # حفظ المنفذ في meta.json
     meta = read_meta(owner, folder)
     meta["port"] = port
     meta["is_web"] = True
@@ -430,7 +470,9 @@ def start_web_project(owner: str, folder: str, startup_file: str):
         env=env
     )
     
-    log_append(f"{owner}::{folder}", f"[SYSTEM] Web app starting on port {port}\n")
+    project_url = get_project_url(owner, folder, port)
+    log_append(f"{owner}::{folder}", f"[SYSTEM] ✅ Web app starting on port {port}\n")
+    log_append(f"{owner}::{folder}", f"[SYSTEM] ✅ Available at: {project_url}\n")
     return proc, log_file
 
 
@@ -494,6 +536,73 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
     except Exception as e:
         log_append(key, f"[SYSTEM] ❌ Start failed: {e}\n")
         set_state(key, "Offline")
+
+
+# ---------------------------
+# Proxy Routes
+# ---------------------------
+
+# المسار الجديد: /proxy/owner/folder
+@app.route("/proxy/<owner>/<folder>")
+@app.route("/proxy/<owner>/<folder>/")
+@app.route("/proxy/<owner>/<folder>/<path:subpath>")
+def proxy_project_new(owner, folder, subpath=""):
+    """عرض المشروع عبر الوكيل العكسي باستخدام الصيغة /proxy/owner/folder"""
+    
+    # التحقق من صلاحية الوصول
+    key = f"{owner}::{folder}"
+    if not can_access_key(key):
+        return "Forbidden: You don't have access to this project", 403
+    
+    meta = read_meta(owner, folder)
+    
+    if meta.get("banned", False):
+        return "This server has been banned by admin", 403
+    
+    state = get_state(key)
+    if state != "Running":
+        return f"Server is not running. Current status: {state}", 404
+    
+    port = meta.get("port", 5000)
+    
+    # بناء الرابط الداخلي
+    target_url = f"http://localhost:{port}/{subpath}"
+    if request.query_string:
+        target_url += f"?{request.query_string.decode()}"
+    
+    try:
+        # توجيه الطلب إلى المشروع الداخلي
+        headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            timeout=30
+        )
+        
+        # إرجاع الاستجابة كما هي
+        return Response(
+            resp.content,
+            status=resp.status_code,
+            headers=dict(resp.headers)
+        )
+    except requests.exceptions.ConnectionError:
+        return f"Project not reachable on port {port}. Make sure it's running.", 502
+    except Exception as e:
+        return f"Proxy error: {e}", 500
+
+
+# المسار القديم للتوافق مع الإصدارات السابقة (اختياري)
+@app.route("/proxy/<path:key>")
+def proxy_project_old(key):
+    """الطريقة القديمة /proxy/owner::folder - للتوافق مع الإصدارات السابقة"""
+    if "::" not in key:
+        return "Invalid proxy path. Use /proxy/owner/folder", 400
+    owner, folder = key.split("::", 1)
+    return proxy_project_new(owner, folder, "")
 
 
 # ---------------------------
@@ -620,7 +729,8 @@ def list_all_servers_for_admin():
                 "key": key,
                 "subtitle": f"Owner: {owner}",
                 "startup_file": meta.get("startup_file", ""),
-                "status": st
+                "status": st,
+                "port": meta.get("port", 5000)
             })
     return servers
 
@@ -644,7 +754,8 @@ def list_servers_for_user(username: str):
             "key": key,
             "subtitle": f"Owner: {username}",
             "startup_file": meta.get("startup_file", ""),
-            "status": st
+            "status": st,
+            "port": meta.get("port", 5000)
         })
     return servers
 
@@ -715,7 +826,7 @@ def server_stats(key):
     owner, folder = parse_server_key(key, allow_admin=True)
     server_dir = get_server_dir(owner, folder)
     if not os.path.isdir(server_dir):
-        return jsonify({"status": "Offline", "cpu": "0%", "mem": "0 MB", "logs": "", "ip": get_ip()}), 404
+        return jsonify({"status": "Offline", "cpu": "0%", "mem": "0 MB", "logs": "", "ip": get_ip(), "port": 5000, "url": ""}), 404
 
     meta = read_meta(owner, folder)
     if meta.get("banned", False):
@@ -753,7 +864,19 @@ def server_stats(key):
         state = "Offline"
         set_state(key, "Offline")
 
-    return jsonify({"status": state, "cpu": cpu, "mem": mem, "logs": logs, "ip": get_ip()})
+    port = meta.get("port", 5000)
+    # استخدام الدالة الجديدة لبناء الرابط
+    url = get_project_url(owner, folder, port) if state == "Running" else ""
+
+    return jsonify({
+        "status": state,
+        "cpu": cpu,
+        "mem": mem,
+        "logs": logs,
+        "ip": get_ip(),
+        "port": port,
+        "url": url
+    })
 
 
 @app.route("/server/action/<path:key>/<act>", methods=["POST"])
@@ -807,6 +930,24 @@ def set_startup(key):
     meta["startup_file"] = f
     write_meta(owner, folder, meta)
     return jsonify({"success": True})
+
+
+@app.route("/server/set-port/<path:key>", methods=["POST"])
+@login_required
+def set_server_port(key):
+    if not can_access_key(key):
+        return jsonify({"success": False, "message": "Forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    new_port = data.get("port")
+    if not isinstance(new_port, int) or new_port < 1024 or new_port > 65535:
+        return jsonify({"success": False, "message": "Port must be between 1024 and 65535"}), 400
+
+    owner, folder = parse_server_key(key, allow_admin=True)
+    meta = read_meta(owner, folder)
+    meta["port"] = new_port
+    write_meta(owner, folder, meta)
+    return jsonify({"success": True, "port": new_port})
 
 
 # ---------------------------
@@ -1113,4 +1254,11 @@ def admin_quickstats():
 
 if __name__ == "__main__":
     port = int(os.environ.get("SERVER_PORT", 3034))
+    public_url = get_public_base_url()
+    if public_url:
+        print(f"\n🚀 RAGNAR HOST RUNNING ON RAILWAY")
+        print(f"📍 Main URL: {public_url}")
+        print(f"📍 Proxy URL: {public_url}/proxy/username/folder")
+    else:
+        print(f"\n🚀 RAGNAR HOST RUNNING ON {get_ip()}:{port}")
     app.run(host="0.0.0.0", port=port)
