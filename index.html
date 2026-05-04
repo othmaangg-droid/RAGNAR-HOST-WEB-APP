@@ -81,7 +81,6 @@
       font-size:12px;
       transition: transform .12s ease, background .12s ease, border-color .12s ease;
       backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
     }
     .btn:hover{transform: translateY(-1px); border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.09);}
     .btn-primary{
@@ -115,9 +114,8 @@
       padding:16px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
       cursor:pointer;
-      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+      transition: transform .15s ease, border-color .15s ease;
       position:relative;
       overflow:hidden;
       min-height: 140px;
@@ -169,8 +167,6 @@
       background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
       border-radius: var(--radius);
       backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
-      box-shadow: var(--shadow);
       overflow:hidden;
     }
 
@@ -233,6 +229,7 @@
     .stat b{display:block;margin-top:4px;font-size:13px}
     #mainFileTxt{color:var(--accent);cursor:pointer}
     #openProjectBtn{color:var(--ok);cursor:pointer}
+    #portTxt{cursor:pointer}
 
     .fm-top{
       display:flex;align-items:flex-start;justify-content:space-between;
@@ -259,17 +256,16 @@
     }
     .modal{
       width:100%;
-      max-width:420px;
+      max-width:450px;
       background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
       border:1px solid rgba(255,255,255,.14);
       border-radius: 18px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      padding:16px;
+      padding:20px;
     }
-    .modal h3{margin:0 0 10px 0}
-    .modal input{
+    .modal h3{margin:0 0 16px 0; color:var(--accent)}
+    .modal input, .modal select{
       width:100%;
       padding:12px;
       border-radius: 14px;
@@ -277,6 +273,20 @@
       background: rgba(0,0,0,.35);
       color: var(--text);
       outline:none;
+      margin-bottom:16px;
+    }
+    .modal select option{background:#0d1117}
+    .modal label{
+      display:block;
+      font-size:13px;
+      margin-bottom:6px;
+      color:var(--muted);
+    }
+    .modal-buttons{
+      display:flex;
+      gap:10px;
+      justify-content:flex-end;
+      margin-top:8px;
     }
 
     #editor-modal{
@@ -294,8 +304,6 @@
       border:1px solid rgba(255,255,255,.14);
       background: rgba(10,14,22,.7);
       backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      box-shadow: var(--shadow);
       display:flex;
       flex-direction:column;
       overflow:hidden;
@@ -330,7 +338,7 @@
              onkeypress="if(event.key==='Enter') location.href='/'">🖥️</div>
         <div>
           <div class="title">RAGNAR HOST</div>
-          <span class="sub" id="pyHostTxt">Python Host: loading...</span>
+          <span class="sub" id="pyHostTxt">Loading...</span>
         </div>
       </div>
 
@@ -374,7 +382,7 @@
           <div class="stat"><div class="ico">⚡</div><div><small>STATUS</small><b id="statusTxt">Offline</b></div></div>
           <div class="stat"><div class="ico">🧠</div><div><small>RAM</small><b id="memTxt">0 MB</b></div></div>
           <div class="stat"><div class="ico">💿</div><div><small>MAIN FILE</small><b id="mainFileTxt" onclick="changeStartup()">Click to set</b></div></div>
-          <div class="stat"><div class="ico">🌐</div><div><small>PORT</small><b id="portTxt" onclick="changePort()">5000 (click to change)</b></div></div>
+          <div class="stat" id="portStat"><div class="ico">🌐</div><div><small>PORT</small><b id="portTxt" onclick="changePort()">5000 (click to change)</b></div></div>
           <div class="stat"><div class="ico">📡</div><div><small>IP</small><b id="ipTxt">0.0.0.0</b></div></div>
         </div>
       </div>
@@ -405,6 +413,31 @@
     </div>
   </div>
 
+  <!-- Modal New Server -->
+  <div id="modalBackdrop" class="modal-backdrop">
+    <div class="modal">
+      <h3>➕ New Server</h3>
+      
+      <label>📛 Server Name</label>
+      <input id="mName" placeholder="e.g., MyAPI" />
+      
+      <label>🔧 Project Type</label>
+      <select id="mType">
+        <option value="web">🌐 Web App (Flask/FastAPI)</option>
+        <option value="python">🐍 Python Bot / Script</option>
+        <option value="api">⚡ API (REST/GraphQL)</option>
+      </select>
+      
+      <label>📄 Main File</label>
+      <input id="mMainFile" placeholder="e.g., app.py, main.py, bot.py" value="app.py" />
+      
+      <div class="modal-buttons">
+        <button class="btn" onclick="closeM()">Cancel</button>
+        <button id="mConfirm" class="btn btn-primary">Create</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Editor -->
   <div id="editor-modal">
     <div class="editor">
@@ -419,23 +452,12 @@
     </div>
   </div>
 
-  <!-- Modal -->
-  <div id="modalBackdrop" class="modal-backdrop">
-    <div class="modal">
-      <h3 id="mTitle">Title</h3>
-      <input id="mIn" />
-      <div class="actions" style="justify-content:flex-end;margin-top:12px">
-        <button class="btn" onclick="closeM()">Cancel</button>
-        <button id="mConfirm" class="btn btn-primary">Confirm</button>
-      </div>
-    </div>
-  </div>
-
 <script>
   let currentSrv = null, poll = null, currentFile = null;
   let currentPath = '';
   let currentUrl = '';
   let currentPort = 5000;
+  let currentProjectType = 'web';
 
   function isAuthPage(){
     return location.pathname.startsWith('/login') || location.pathname.startsWith('/create');
@@ -462,7 +484,7 @@
 
       const port = location.port || 5000;
       if(!d.servers || d.servers.length === 0){
-        ipTxt.textContent = `Python Host: ${location.hostname}:${port}`;
+        ipTxt.textContent = `RAGNAR HOST: ${location.hostname}:${port}`;
         return;
       }
 
@@ -471,10 +493,10 @@
       if (s.redirected){ safeRedirect(s.url); return; }
       const sd = await s.json();
       const ip = sd.ip || location.hostname;
-      ipTxt.textContent = `Python Host: ${ip}:${port}`;
+      ipTxt.textContent = `RAGNAR HOST: ${ip}:${port}`;
     }catch(e){
       const port = location.port || 5000;
-      ipTxt.textContent = `Python Host: ${location.hostname}:${port}`;
+      ipTxt.textContent = `RAGNAR HOST: ${location.hostname}:${port}`;
     }
   }
 
@@ -510,6 +532,7 @@
   function openServer(s) {
     currentSrv = s;
     currentPath = '';
+    currentProjectType = s.project_type || 'web';
 
     document.getElementById('homeView').style.display = 'none';
     document.getElementById('serverView').style.display = 'block';
@@ -521,6 +544,14 @@
     document.getElementById('mainFileTxt').textContent = s.startup_file || "Click to set";
     document.getElementById('portTxt').textContent = (s.port || 5000) + " (click to change)";
     currentPort = s.port || 5000;
+
+    // ✅ إخفاء أو إظهار عناصر حسب نوع المشروع
+    const isWebType = (currentProjectType === 'web' || currentProjectType === 'api');
+    const portStat = document.getElementById('portStat');
+    const openProjectBtn = document.getElementById('openProjectBtn');
+    
+    if (portStat) portStat.style.display = isWebType ? 'flex' : 'none';
+    if (openProjectBtn) openProjectBtn.style.display = 'none'; // يظهر فقط عند وجود url من الـ stats
 
     switchTab('console');
   }
@@ -562,7 +593,10 @@
           document.getElementById('portTxt').textContent = d.port + " (click to change)";
           currentPort = d.port;
         }
-        if (d.url) {
+        
+        // إظهار زر Open Project فقط للمشاريع من نوع web/api وعند وجود url
+        const isWebType = (currentProjectType === 'web' || currentProjectType === 'api');
+        if (d.url && isWebType) {
           currentUrl = d.url;
           document.getElementById('openProjectBtn').style.display = 'block';
         } else {
@@ -592,12 +626,15 @@
     if (currentUrl) {
       window.open(currentUrl, '_blank');
     } else {
-      alert("Project URL not available. Make sure it's running and is a web project.");
+      const proxyUrl = `${window.location.origin}/proxy/${currentSrv.owner}/${currentSrv.folder}`;
+      if(confirm(`Open proxy link?\n${proxyUrl}`)) {
+        window.open(proxyUrl, '_blank');
+      }
     }
   }
 
   function changeStartup() {
-    openM("Set Main File (example: bot.py or app.py)", currentSrv.startup_file || "", async (v) => {
+    openM("Set Main File", currentSrv.startup_file || "", async (v) => {
       await fetch(`/server/set-startup/${encodeURIComponent(currentSrv.key)}`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -610,6 +647,11 @@
   }
 
   function changePort() {
+    // فقط للمشاريع من نوع web/api يسمح بتغيير المنفذ
+    if (currentProjectType !== 'web' && currentProjectType !== 'api') {
+      alert("Port setting is only available for Web Apps and APIs");
+      return;
+    }
     openM("Set Port (1024-65535)", currentPort, async (v) => {
       const portNum = parseInt(v);
       if (isNaN(portNum) || portNum < 1024 || portNum > 65535) {
@@ -799,26 +841,65 @@
 
   function closeEditor(){ document.getElementById('editor-modal').style.display='none'; }
 
-  function openM(t, v, cb) {
-    document.getElementById('modalBackdrop').style.display='flex';
-    document.getElementById('mTitle').textContent=t;
-    document.getElementById('mIn').value=v || "";
-    document.getElementById('mConfirm').onclick=()=>cb(document.getElementById('mIn').value);
+  function openM(title, defaultValue, callback) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.style.display = 'flex';
+    modal.innerHTML = `
+      <div class="modal">
+        <h3>${title}</h3>
+        <input id="modalInput" value="${escapeAttr(defaultValue)}" />
+        <div class="modal-buttons">
+          <button class="btn" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+          <button class="btn btn-primary" id="modalConfirm">Confirm</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    document.getElementById('modalConfirm').onclick = () => {
+      const val = document.getElementById('modalInput').value;
+      modal.remove();
+      callback(val);
+    };
   }
-  function closeM(){ document.getElementById('modalBackdrop').style.display='none'; }
 
-  document.getElementById('newBtn').onclick = () => openM("New Server Name", "", async (v) => {
+  function closeM() {
+    const modal = document.querySelector('#modalBackdrop');
+    if (modal) modal.style.display = 'none';
+  }
+
+  document.getElementById('mConfirm').onclick = async () => {
+    const name = document.getElementById('mName').value.trim();
+    const projectType = document.getElementById('mType').value;
+    const mainFile = document.getElementById('mMainFile').value.trim();
+
+    if (!name) {
+      alert('Please enter server name');
+      return;
+    }
+    if (!mainFile) {
+      alert('Please enter main file name');
+      return;
+    }
+
     const res = await fetch('/add', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name:v})
+      body: JSON.stringify({ name, project_type: projectType, startup_file: mainFile })
     });
     const d = await res.json().catch(()=>({success:false,message:'Error'}));
     if(!d.success){ alert(d.message || 'Failed'); return; }
     closeM();
     loadServers();
     loadPythonHost();
-  });
+  };
+
+  document.getElementById('newBtn').onclick = () => {
+    document.getElementById('mName').value = '';
+    document.getElementById('mType').value = 'web';
+    document.getElementById('mMainFile').value = 'app.py';
+    document.getElementById('modalBackdrop').style.display = 'flex';
+  };
 
   function escapeHtml(s){
     return (s||'')
