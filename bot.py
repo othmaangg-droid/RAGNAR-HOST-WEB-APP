@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import sys
+import atexit
 
 import psutil
 import requests
@@ -28,8 +29,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", "CHANGE_ME_" + os.urandom(16).hex())
 
-ADMIN_USERNAME = os.environ.get("ADMIN_USER", "RAGNAR")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "RAGNAR321")
+ADMIN_USERNAME = os.environ.get("ADMIN_USER", "hama")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASS", "1211")
 
 # ✅ قائمة origins المسموحة (يمكنك تعديلها)
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5000,http://localhost:3034").split(",")
@@ -478,7 +479,6 @@ def start_web_project(owner: str, folder: str, startup_file: str):
         try:
             with open(startup_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-                # دعم صيغ متعددة للمنفذ
                 match = re.search(r'port\s*=\s*(\d+)', content)
                 if match:
                     port = int(match.group(1))
@@ -578,9 +578,7 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
 @app.route("/proxy/<owner>/<folder>/")
 @app.route("/proxy/<owner>/<folder>/<path:subpath>")
 def proxy_project(owner, folder, subpath=""):
-    """
-    عرض المشروع - مفتوح للجميع (بدون مصادقة) لأنها مشاريع المستخدمين
-    """
+    """عرض المشروع - مفتوح للجميع (بدون مصادقة) لأنها مشاريع المستخدمين"""
     key = f"{owner}::{folder}"
     
     server_dir = get_server_dir(owner, folder)
@@ -1199,8 +1197,6 @@ def admin_server_ban():
     
     # دعم كل من key و folder
     if "::" not in key:
-        # إذا كان مجرد folder، نحتاج إلى معرفة المالك
-        # سنحاول العثور على السيرفر
         found = None
         for s in list_all_servers_for_admin():
             if s.get("folder") == key:
@@ -1300,8 +1296,68 @@ def admin_quickstats():
     }})
 
 
+# ================= Auto-start servers after restart =================
+def save_running_servers():
+    """حفظ السيرفرات الشغالة قبل إغلاق التطبيق"""
+    running_keys = []
+    for key, (proc, _) in running_procs.items():
+        if proc.poll() is None:
+            running_keys.append(key)
+    
+    if running_keys:
+        state_file = os.path.join(DATA_DIR, "last_state.json")
+        try:
+            with open(state_file, "w") as f:
+                json.dump({key: True for key in running_keys}, f)
+            print(f"[AUTO-START] Saved {len(running_keys)} running servers")
+        except Exception as e:
+            print(f"[AUTO-START] Failed to save state: {e}")
+
+
+def auto_start_previous_servers():
+    """تشغيل أي سيرفر كان شغالاً قبل إعادة تشغيل التطبيق"""
+    state_file = os.path.join(DATA_DIR, "last_state.json")
+    
+    if not os.path.exists(state_file):
+        return
+    
+    try:
+        with open(state_file, "r") as f:
+            last_state = json.load(f)
+        
+        started = 0
+        for key in last_state.keys():
+            try:
+                owner, folder = parse_server_key(key, allow_admin=True)
+                meta = read_meta(owner, folder)
+                startup = meta.get("startup_file")
+                if startup and not meta.get("banned", False):
+                    print(f"[AUTO-START] Starting {key}...")
+                    t = threading.Thread(target=background_start, args=(key, owner, folder, startup), daemon=True)
+                    t.start()
+                    started += 1
+                    time.sleep(0.5)  # تجنب ازدحام العمليات
+            except Exception as e:
+                print(f"[AUTO-START] Failed for {key}: {e}")
+        
+        print(f"[AUTO-START] Started {started} servers")
+        
+        # حذف الملف بعد القراءة
+        os.remove(state_file)
+    except Exception as e:
+        print(f"[AUTO-START] Error: {e}")
+
+
+# تسجيل الإغلاق لحفظ الحالة
+atexit.register(save_running_servers)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("SERVER_PORT", 3034))
+    
+    # ✅ تشغيل السيرفرات التي كانت شغالة سابقاً (بعد التحديث)
+    auto_start_previous_servers()
+    
     public_url = get_public_base_url()
     if public_url:
         print(f"\n🚀 RAGNAR HOST RUNNING ON RAILWAY")
@@ -1312,5 +1368,7 @@ if __name__ == "__main__":
     print(f"✅ CORS configured securely")
     print(f"✅ Proxy routes support public access (no login required)")
     print(f"✅ Admin can create users via /admin")
-    print(f"✅ Create page removed - accounts are admin-only\n")
+    print(f"✅ Create page removed - accounts are admin-only")
+    print(f"✅ Auto-start: servers will restart automatically after reboot\n")
+    
     app.run(host="0.0.0.0", port=port)
