@@ -530,7 +530,8 @@
     document.getElementById('serverView').style.display='none';
     document.getElementById('homeBtn').style.display='none';
     document.getElementById('newBtn').style.display='inline-block';
-    clearInterval(poll);
+    if(poll) clearInterval(poll);
+    poll = null;
     loadServers();
   }
 
@@ -542,7 +543,11 @@
     document.getElementById('viewFiles').style.display = t === 'files' ? 'block' : 'none';
 
     if(t === 'console') startPolling();
-    else { clearInterval(poll); loadFiles(); }
+    else { 
+      if(poll) clearInterval(poll);
+      poll = null;
+      loadFiles(); 
+    }
   }
 
   async function startPolling() {
@@ -642,7 +647,7 @@
     const crumbs = [`<span class="crumb"><a href="javascript:void(0)" onclick="jumpPath('')">root</a></span>`];
     for (const p of parts) {
       acc = acc ? (acc + '/' + p) : p;
-      crumbs.push(`<span class="sep">/</span><span class="crumb"><a href="javascript:void(0)" onclick="jumpPath('${escapeAttr(acc)}')">${escapeHtml(p)}</a></span>`);
+      crumbs.push(`<span class="sep">/</span><span class="crumb"><a href="javascript:void(0)" onclick="jumpPath('${encodeURIComponent(acc)}')">${escapeHtml(p)}</a></span>`);
     }
     document.getElementById('pathBar').innerHTML = crumbs.join('');
 
@@ -652,14 +657,14 @@
       const name = d.name;
       rows.push(`
         <tr>
-          <td><span class="name-link" onclick="openFolder('${escapeAttr(name)}')">📁 ${escapeHtml(name)}</span></td>
+          <td><span class="name-link" onclick="openFolder('${encodeURIComponent(name)}')">📁 ${escapeHtml(name)}</span></td>
           <td style="color:var(--muted)">—</td>
           <td class="row-actions">
-            <button class="btn btn-mini" onclick="openFolder('${escapeAttr(name)}')">Open</button>
-            <button class="btn btn-mini" onclick="renameDir('${escapeAttr(name)}')">Rename</button>
-            <button class="btn btn-mini btn-danger" onclick="deleteDir('${escapeAttr(name)}')">Delete</button>
-           </td>
-         </tr>
+            <button class="btn btn-mini" onclick="openFolder('${encodeURIComponent(name)}')">Open</button>
+            <button class="btn btn-mini" onclick="renameDir('${encodeURIComponent(name)}')">Rename</button>
+            <button class="btn btn-mini btn-danger" onclick="deleteDir('${encodeURIComponent(name)}')">Delete</button>
+          </td>
+        </tr>
       `);
     }
 
@@ -667,13 +672,13 @@
       const relFile = currentPath ? `${currentPath}/${f.name}` : f.name;
       rows.push(`
         <tr>
-          <td><span class="name-link" onclick="openEditor('${escapeAttr(relFile)}')">📄 ${escapeHtml(f.name)}</span></td>
+          <td><span class="name-link" onclick="openEditor('${encodeURIComponent(relFile)}')">📄 ${escapeHtml(f.name)}</span></td>
           <td>${escapeHtml(f.size || '')}</td>
           <td class="row-actions">
-            <button class="btn btn-mini" onclick="renameFilePrompt('${escapeAttr(f.name)}')">Rename</button>
-            <button class="btn btn-mini btn-danger" onclick="deleteFilePrompt('${escapeAttr(f.name)}')">Delete</button>
-           </td>
-         </tr>
+            <button class="btn btn-mini" onclick="renameFilePrompt('${encodeURIComponent(f.name)}')">Rename</button>
+            <button class="btn btn-mini btn-danger" onclick="deleteFilePrompt('${encodeURIComponent(f.name)}')">Delete</button>
+          </td>
+        </tr>
       `);
     }
 
@@ -684,7 +689,7 @@
     currentPath = currentPath ? (currentPath + '/' + name) : name;
     loadFiles();
   }
-  function jumpPath(p) { currentPath = p || ''; loadFiles(); }
+  function jumpPath(p) { currentPath = decodeURIComponent(p) || ''; loadFiles(); }
   function goUp() {
     if (!currentPath) return;
     const parts = currentPath.split('/').filter(Boolean);
@@ -777,10 +782,10 @@
   }
 
   async function openEditor(name) {
-    currentFile = name;
-    document.getElementById('ed-title').textContent = name;
+    currentFile = decodeURIComponent(name);
+    document.getElementById('ed-title').textContent = currentFile;
 
-    const res = await fetch(`/files/content/${encodeURIComponent(currentSrv.key)}?file=${encodeURIComponent(name)}`);
+    const res = await fetch(`/files/content/${encodeURIComponent(currentSrv.key)}?file=${encodeURIComponent(currentFile)}`);
     if (res.redirected){ safeRedirect(res.url); return; }
 
     const data = await res.json();
@@ -822,13 +827,12 @@
 
   function escapeHtml(s){
     return (s||'')
-      .replaceAll('&','&amp;')
-      .replaceAll('<','&lt;')
-      .replaceAll('>','&gt;')
-      .replaceAll('"','&quot;')
-      .replaceAll("'","&#039;");
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
-  function escapeAttr(s){ return escapeHtml(s).replaceAll("\\","\\\\"); }
 
   document.addEventListener('DOMContentLoaded', ()=>{
     loadServers();
