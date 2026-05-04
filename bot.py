@@ -509,7 +509,6 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         server_dir = get_server_dir(owner, folder)
         startup_path = os.path.join(server_dir, startup_file)
         
-        # قراءة نوع المشروع من meta.json
         meta = read_meta(owner, folder)
         project_type = meta.get("project_type", "web")
         
@@ -533,7 +532,7 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         set_state(key, "Offline")
 
 
-# =============== Proxy Routes مع دعم الوصول العام ===============
+# =============== Proxy Routes ===============
 @app.route("/proxy/<owner>/<folder>")
 @app.route("/proxy/<owner>/<folder>/")
 @app.route("/proxy/<owner>/<folder>/<path:subpath>")
@@ -773,7 +772,6 @@ def add_server():
     if not folder:
         return jsonify({"success": False, "message": "Invalid server name"}), 400
     
-    # قراءة البيانات الجديدة
     project_type = data.get("project_type", "web")
     startup_file = data.get("startup_file", "")
     
@@ -805,7 +803,6 @@ def add_server():
     }
     write_meta(owner, folder, meta)
     
-    # تسجيل في اللوق
     log_append(f"{owner}::{folder}", f"[SYSTEM] Server created - Type: {project_type}, Main file: {startup_file}\n")
     
     set_state(folder if not is_admin_session() else f"{owner}::{folder}", "Offline")
@@ -830,6 +827,8 @@ def server_stats(key):
         return jsonify({"status": "Offline", "cpu": "0%", "mem": "0 MB", "logs": "", "ip": get_ip(), "port": 5000, "url": "", "project_type": "web"}), 404
     
     meta = read_meta(owner, folder)
+    project_type = meta.get("project_type", "web")
+    
     if meta.get("banned", False):
         set_state(key, "Banned")
     
@@ -866,8 +865,13 @@ def server_stats(key):
         set_state(key, "Offline")
     
     port = meta.get("port", 5000)
-    public_base = get_public_base_url() or request.host
-    url = f"https://{public_base}/proxy/{owner}/{folder}" if state == "Running" and meta.get("project_type") != "python" else ""
+    
+    # ✅ web و api فقط يظهر لهم رابط المشروع
+    if state == "Running" and (project_type == "web" or project_type == "api"):
+        public_base = get_public_base_url() or request.host
+        url = f"https://{public_base}/proxy/{owner}/{folder}"
+    else:
+        url = ""
     
     return jsonify({
         "status": state,
@@ -877,7 +881,7 @@ def server_stats(key):
         "ip": get_ip(),
         "port": port,
         "url": url,
-        "project_type": meta.get("project_type", "web")
+        "project_type": project_type
     })
 
 
@@ -947,6 +951,12 @@ def set_server_port(key):
     
     owner, folder = parse_server_key(key, allow_admin=True)
     meta = read_meta(owner, folder)
+    
+    # فقط web و api يسمح لهم بتغيير المنفذ
+    project_type = meta.get("project_type", "web")
+    if project_type not in ["web", "api"]:
+        return jsonify({"success": False, "message": "Port setting only available for Web Apps and APIs"}), 403
+    
     meta["port"] = new_port
     write_meta(owner, folder, meta)
     
@@ -1272,6 +1282,7 @@ if __name__ == "__main__":
     else:
         print(f"\n🚀 RAGNAR HOST RUNNING ON {get_ip()}:{port}")
     print(f"✅ CORS enabled for all origins")
-    print(f"✅ Projects can be: Web App, API, or Python Script")
-    print(f"✅ Main file is saved on creation\n")
+    print(f"✅ Projects: Web App, API, or Python Script")
+    print(f"✅ Main file is saved on creation")
+    print(f"✅ Port visible/configurable for Web App & API only\n")
     app.run(host="0.0.0.0", port=port)
