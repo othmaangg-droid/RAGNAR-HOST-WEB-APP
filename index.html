@@ -424,8 +424,8 @@
       <label>🔧 Project Type</label>
       <select id="mType">
         <option value="web">🌐 Web App (Flask/FastAPI)</option>
-        <option value="python">🐍 Python Bot / Script</option>
         <option value="api">⚡ API (REST/GraphQL)</option>
+        <option value="python">🐍 Python Bot / Script</option>
       </select>
       
       <label>📄 Main File</label>
@@ -543,7 +543,6 @@
     document.getElementById('srvHeader').textContent = s.title;
     document.getElementById('srvSub').textContent = s.subtitle || '';
     
-    // ✅ عرض الملف الرئيسي إذا كان محدداً
     const mainFile = s.startup_file;
     if (mainFile && mainFile !== "") {
       document.getElementById('mainFileTxt').textContent = mainFile;
@@ -551,7 +550,8 @@
       document.getElementById('mainFileTxt').textContent = "Click to set";
     }
     
-    // ✅ إخفاء أو إظهار عناصر حسب نوع المشروع
+    // ✅ web أو api -> يظهر PORT
+    // python -> يخفي PORT
     const isWebType = (currentProjectType === 'web' || currentProjectType === 'api');
     const portStat = document.getElementById('portStat');
     const openProjectBtn = document.getElementById('openProjectBtn');
@@ -736,7 +736,7 @@
             <button class="btn btn-mini" onclick="openFolder('${escapeAttr(name)}')">Open</button>
             <button class="btn btn-mini" onclick="renameDir('${escapeAttr(name)}')">Rename</button>
             <button class="btn btn-mini btn-danger" onclick="deleteDir('${escapeAttr(name)}')">Delete</button>
-          </td>
+           </td>
         </tr>
       `);
     }
@@ -750,7 +750,7 @@
           <td class="row-actions">
             <button class="btn btn-mini" onclick="renameFilePrompt('${escapeAttr(f.name)}')">Rename</button>
             <button class="btn btn-mini btn-danger" onclick="deleteFilePrompt('${escapeAttr(f.name)}')">Delete</button>
-          </td>
+           </td>
         </tr>
       `);
     }
