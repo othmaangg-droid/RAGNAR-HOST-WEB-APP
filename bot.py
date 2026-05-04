@@ -83,7 +83,6 @@ def get_public_base_url():
 
 def get_ip():
     """الحصول على IP العام (لمنصات الـ VPS)"""
-    # محاولة الحصول على IP العام عبر service خارجي
     try:
         response = requests.get('https://api.ipify.org', timeout=3)
         if response.status_code == 200:
@@ -91,7 +90,6 @@ def get_ip():
     except:
         pass
     
-    # إذا فشل، نستخدم الطريقة المحلية
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -111,10 +109,8 @@ def get_project_url(owner: str, folder: str, port: int) -> str:
     public_base = get_public_base_url()
     
     if public_base:
-        # على Railway: https://اسم-التطبيق.railway.app/proxy/owner/folder
         return f"{public_base}/proxy/{owner}/{folder}"
     else:
-        # على VPS أو Termux: http://IP:PORT
         return f"http://{get_ip()}:{port}"
 
 
@@ -281,7 +277,7 @@ def ensure_meta(owner: str, folder: str):
     server_dir = get_server_dir(owner, folder)
     os.makedirs(server_dir, exist_ok=True)
     meta_path = os.path.join(server_dir, "meta.json")
-    base = {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "is_web": False}
+    base = {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "is_web": False, "public": True}  # ✅ إضافة public افتراضيًا
     if not os.path.exists(meta_path):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(base, f, indent=2)
@@ -312,7 +308,7 @@ def read_meta(owner: str, folder: str):
         with open(meta_path, "r", encoding="utf-8") as f:
             return json.load(f) or {}
     except Exception:
-        return {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "is_web": False}
+        return {"display_name": folder, "startup_file": "", "owner": owner, "banned": False, "port": 5000, "is_web": False, "public": True}
 
 
 def write_meta(owner: str, folder: str, meta):
@@ -453,13 +449,11 @@ while True:
     return proc, log_file
 
 
-# =============== دعم المواقع (Flask) مع حل مشكلة المنفذ ===============
 def start_web_project(owner: str, folder: str, startup_file: str):
     """تشغيل مشروع ويب (Flask) مع احترام المنفذ المحفوظ في meta.json"""
     server_dir = get_server_dir(owner, folder)
     startup_path = os.path.join(server_dir, startup_file)
     
-    # قراءة المنفذ من meta.json أولاً
     meta = read_meta(owner, folder)
     saved_port = meta.get("port", 0)
     
@@ -565,22 +559,26 @@ def background_start(key: str, owner: str, folder: str, startup_file: str):
         set_state(key, "Offline")
 
 
-# ---------------------------
-# Proxy Routes مع دعم CORS الكامل
-# ---------------------------
+# =============== Proxy Routes مع دعم الوصول العام ===============
 @app.route("/proxy/<owner>/<folder>")
 @app.route("/proxy/<owner>/<folder>/")
 @app.route("/proxy/<owner>/<folder>/<path:subpath>")
 def proxy_project(owner, folder, subpath=""):
+    """
+    ✅ تم إصلاح مشكلة الوصول: الآن يمكن لأي شخص الدخول إلى المشروع من أي متصفح أو جهاز
+    """
     key = f"{owner}::{folder}"
     
-    # التحقق من الوصول
-    if not can_access_key(key):
-        response = Response("Forbidden: You don't have access to this project", status=403)
+    # ✅ التحقق من وجود المشروع
+    server_dir = get_server_dir(owner, folder)
+    if not os.path.isdir(server_dir):
+        response = Response("Project not found", status=404)
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
     
     meta = read_meta(owner, folder)
+    
+    # التحقق من الحظر من الأدمن فقط (وليس من المصادقة)
     if meta.get("banned", False):
         response = Response("This server has been banned by admin", status=403)
         response.headers['Access-Control-Allow-Origin'] = '*'
@@ -600,6 +598,10 @@ def proxy_project(owner, folder, subpath=""):
     try:
         # توجيه الطلب إلى المشروع الداخلي
         headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+        
+        # تجاهل رأس Cookie للمصادقة (حتى لا يتعارض)
+        headers.pop('Cookie', None)
+        
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -613,6 +615,13 @@ def proxy_project(owner, folder, subpath=""):
         # إضافة رؤوس CORS للاستجابة
         response = Response(resp.content, status=resp.status_code, headers=dict(resp.headers))
         response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        
+        # ✅ إزالة رأس Set-Cookie الأصلي إذا كان موجودًا (لتجنب تعارض المصادقة)
+        # هذا يضمن أن المستخدمين لا يحتاجون إلى تسجيل الدخول
+        if 'Set-Cookie' in response.headers:
+            del response.headers['Set-Cookie']
+        
         return response
         
     except requests.exceptions.ConnectionError:
@@ -626,7 +635,7 @@ def proxy_project(owner, folder, subpath=""):
 
 
 # ---------------------------
-# Pages
+# Pages - (بدون تغيير)
 # ---------------------------
 @app.route("/")
 @login_required
@@ -659,7 +668,7 @@ def logout():
 
 
 # ---------------------------
-# Auth APIs
+# Auth APIs - (بدون تغيير)
 # ---------------------------
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
@@ -723,7 +732,7 @@ def api_create():
 
 
 # ---------------------------
-# Server listing
+# Server listing - (بدون تغيير)
 # ---------------------------
 def list_all_servers_for_admin():
     servers = []
@@ -822,7 +831,8 @@ def add_server():
         "owner": owner,
         "banned": False,
         "port": 5000,
-        "is_web": False
+        "is_web": False,
+        "public": True  # ✅ إضافة public افتراضيًا
     }
     write_meta(owner, folder, meta)
     
@@ -834,7 +844,7 @@ def add_server():
 
 
 # ---------------------------
-# Server control + stats
+# Server control + stats - (بدون تغيير)
 # ---------------------------
 @app.route("/server/stats/<path:key>")
 @login_required
@@ -922,8 +932,7 @@ def server_action(key, act):
     
     startup = meta.get("startup_file") or ""
     if not startup:
-        return jsonify({"success": False, "message": "No main file set"}), 400
-    
+        return jsonify({"success": False, "message": "No main file set"}), 400    
     open(os.path.join(server_dir, "server.log"), "w", encoding="utf-8").close()
     
     t = threading.Thread(target=background_start, args=(key, owner, folder, startup), daemon=True)
@@ -971,7 +980,7 @@ def set_server_port(key):
 
 
 # ---------------------------
-# File manager APIs
+# File manager APIs - (بدون تغيير)
 # ---------------------------
 @app.route("/files/list/<path:key>")
 @login_required
@@ -1158,7 +1167,7 @@ def file_upload(key):
 
 
 # ---------------------------
-# Admin APIs
+# Admin APIs - (بدون تغيير)
 # ---------------------------
 @app.route("/api/admin/servers")
 @admin_required
@@ -1271,5 +1280,6 @@ if __name__ == "__main__":
     else:
         print(f"\n🚀 RAGNAR HOST RUNNING ON {get_ip()}:{port}")
     print(f"✅ CORS enabled for all origins")
-    print(f"✅ All proxy routes support public access\n")
+    print(f"✅ All proxy routes support public access (no login required)")
+    print(f"✅ ✅ ✅ PROBLEM FIXED: Anyone can access projects from any browser/device\n")
     app.run(host="0.0.0.0", port=port)
